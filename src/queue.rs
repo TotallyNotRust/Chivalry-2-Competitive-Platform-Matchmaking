@@ -1,11 +1,14 @@
+use std::sync::Arc;
+
 use socketioxide::extract::SocketRef;
 
-use crate::lib::database::model::Account;
+use crate::Account;
 
+#[derive(Clone)]
 pub struct Queue {
     pub gamemode: i16,
     pub account: Account,
-    pub socket: SocketRef,
+    pub socket: Arc<SocketRef>,
 }
 
 

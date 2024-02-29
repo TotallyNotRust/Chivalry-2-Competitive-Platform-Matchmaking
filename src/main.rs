@@ -98,23 +98,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app).await.unwrap();
 
     loop {
-        let mut queue_lock = QUEUED_PLAYERS.read().await;
-        if let queue = *queue_lock {
-            drop(queue_lock);
-            while let Some(queue_one) = &queue.pop() {
-                for queue_two in &queue {
-                    if queue_one.gamemode == queue_two.gamemode {
-                        let match_qual = evaluate_match(queue_one, queue_two);
+        let queue_lock = QUEUED_PLAYERS.read().await;
+        let mut queue = queue_lock.clone();
+        drop(queue_lock);
+        while let Some(queue_one) = &queue.pop() {
+            for queue_two in &queue {
+                if queue_one.gamemode == queue_two.gamemode {
+                    let match_qual = evaluate_match(queue_one, queue_two);
 
-                        if match_qual.match_allowed {
-                            println!("Found match");
+                    if match_qual.match_allowed {
+                        println!("Found match");
 
-                        }
+                        
+
+                        queue_one.socket.emit("match-found", "e2e").ok();
+                        queue_two.socket.emit("match-found", "e2e").ok();
                     }
                 }
             }
-        } else {
-            drop(queue_lock);
         }
     }
 }
@@ -160,23 +161,20 @@ async fn handle_player_join_queue(s: SocketRef, _account_token: Data<String>) {
     println!("Player with id {} wants to join the queue", _account.id);
     // If player is not queued
     let queued_players_ref = QUEUED_PLAYERS.read().await;
-    println!("wefhuwfuiwefhuiwefhweuifhwefuiweh");
     if (*queued_players_ref).iter().any(|x: &Queue| x.account.id == _account.id) {
         drop(queued_players_ref);
         println!("Player with id {} joined queue", _account.id);
         s.emit("joined-queue", "").ok();
+        
+        let mut queue_ref = QUEUED_PLAYERS.write().await;
+        queue_ref.push(Queue {
+            gamemode: 1,
+            account: _account.clone(),
+            socket: Arc::new(s),
+        });
 
-        {
-            let mut queue_ref = QUEUED_PLAYERS.write().await;
-            queue_ref.push(Queue {
-                gamemode: 1,
-                account: _account.clone(),
-                socket: s,
-            });
-
-            drop(queue_ref);
-            println!("Added Player with id {} to queue", _account.id);
-        };
+        drop(queue_ref);
+        println!("Added Player with id {} to queue", _account.id);
     } else {
         drop(queued_players_ref);
         println!(
