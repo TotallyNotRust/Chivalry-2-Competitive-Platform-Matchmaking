@@ -12,6 +12,7 @@ use socketioxide::{
     extract::{Data, SocketRef},
     SocketIo,
 };
+use crate::lib::database::schema::made_matches::dsl::made_matches;
 use tokio::sync::Mutex;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
@@ -101,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let queue_lock = QUEUED_PLAYERS.read().await;
         let mut queue = queue_lock.clone();
         drop(queue_lock);
+        println!("{:#?}", queue);
         while let Some(queue_one) = &queue.pop() {
             for queue_two in &queue {
                 if queue_one.gamemode == queue_two.gamemode {
@@ -109,7 +111,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if match_qual.match_allowed {
                         println!("Found match");
 
-                        
+                        insert_into(made_matches).values(
+                            NewMatch {
+                                gamemode: 1,
+                            }
+                        ).execute(&mut establish_connection());
+
+                        let match_id = made_matches.select(last_id());
 
                         queue_one.socket.emit("match-found", "e2e").ok();
                         queue_two.socket.emit("match-found", "e2e").ok();
