@@ -2,6 +2,9 @@ use std::sync::Arc;
 use std::{collections::HashMap, env};
 use tokio::sync::RwLock;
 
+use std::thread;
+use std::time::Duration;
+
 use axum::routing::get;
 use diesel::{
     insert_into, sql_function, sql_query, sql_types::Integer, BoolExpressionMethods, Connection,
@@ -12,7 +15,7 @@ use socketioxide::{
     extract::{Data, SocketRef},
     SocketIo,
 };
-use crate::lib::database::schema::made_matches::dsl::made_matches;
+use crate::lib::database::schema::made_matches::dsl::{made_matches, id as match_id};
 use tokio::sync::Mutex;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
@@ -21,7 +24,8 @@ use lazy_static::lazy_static;
 use lib::database::{
     model::*,
 };
-
+use crate::r#match::MatchWithPlayers;
+use crate::message::Message;
 use crate::{
     lib::database::model::{Account, NewToken, Token},
     lib::database::schema::{
@@ -34,6 +38,8 @@ use crate::queue::Queue;
 
 mod lib;
 mod queue;
+mod r#match; // r# is used to use "match" as identifier instead of keyword
+mod message;
 
 type AccountId = i32;
 lazy_static! {
@@ -84,6 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     io.ns("/", |s: SocketRef| {
         // For each "message" event received, send a "message-back" event with the "Hello World!" event
         s.on("start-queue", handle_player_join_queue);
+        s.on("message-match", handle_player_message);
     });
 
     let app = axum::Router::new()
@@ -95,44 +102,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await.unwrap();
-    println!("Opened listener on port 3001");
-    axum::serve(listener, app).await.unwrap();
 
-    loop {
-        let queue_lock = QUEUED_PLAYERS.read().await;
-        let mut queue = queue_lock.clone();
-        drop(queue_lock);
-        println!("{:#?}", queue);
-        while let Some(queue_one) = &queue.pop() {
-            for queue_two in &queue {
-                if queue_one.gamemode == queue_two.gamemode {
-                    let match_qual = evaluate_match(queue_one, queue_two);
-
-                    if match_qual.match_allowed {
-                        println!("Found match");
-
-                        insert_into(made_matches).values(
-                            NewMatch {
-                                gamemode: 1,
+    let _handler = tokio::spawn(async {
+        println!("Thread spawned");
+        let mut last_queue: Vec<Queue> = vec![];
+        loop {
+            let queue_lock = QUEUED_PLAYERS.read().await;
+            let mut queue = queue_lock.clone();
+            drop(queue_lock);
+            if queue.len() <= 1 {
+                continue; // Queue is too short, no point in checking
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            // New queue worth testing
+            last_queue = queue.clone();
+            
+            println!("{:#?}", queue);
+            while let Some(queue_one) = &queue.pop() {
+                for queue_two in &queue {
+                    if queue_one.gamemode == queue_two.gamemode {
+                        let match_qual = evaluate_match(queue_one, queue_two);
+                        println!("Potential match {:?} vs {:?}", queue_one.account.id, queue_two.account.id);
+    
+                        if match_qual.match_allowed {
+                            let mut queue_lock = QUEUED_PLAYERS.write().await;
+                            println!("Found match");
+    
+                            insert_into(made_matches).values(
+                                NewMatch {
+                                    gamemode: 1,
+                                }
+                            ).execute(&mut establish_connection());
+    
+                            if let Ok(player_match) = made_matches.order(match_id.desc()).first::<Match>(&mut establish_connection()) {
+                                let r#match = MatchWithPlayers::from_match(&player_match, vec![queue_one.account.clone(), queue_two.account.clone()]);
+                                queue_one.socket.emit("match-found", serde_json::to_string(&r#match).ok()).ok();
+                                queue_two.socket.emit("match-found", serde_json::to_string(&r#match).ok()).ok();
+                                connect_to_room(queue_one, &r#match);
+                                connect_to_room(queue_two, &r#match);
+                                queue_lock.retain(|x: &Queue| x != queue_one && x != queue_two); // Remove players from queue
+                                drop(queue_lock);
+                            } else {
+                                println!("Failed to create match");
+                                queue_one.socket.emit("matchmaking_failed", 0).ok();
+                                queue_two.socket.emit("matchmaking_failed", 0).ok();
                             }
-                        ).execute(&mut establish_connection());
-
-                        let match_id = made_matches.select(last_id());
-
-                        queue_one.socket.emit("match-found", "e2e").ok();
-                        queue_two.socket.emit("match-found", "e2e").ok();
+                        }
                     }
                 }
             }
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-    }
+    });
+
+    println!("Opening listener on port 3001");
+    axum::serve(listener, app).await.unwrap();
+    loop {}
 }
 
 fn evaluate_match(queue_one: &Queue, queue_two: &Queue) -> MatchQualityConclusion {
     return MatchQualityConclusion {
         skill_gap: 500,
         match_quality: MatchQuality::Subpar,
-        match_allowed: false,
+        match_allowed: true,
     };
 }
 
@@ -169,7 +201,7 @@ async fn handle_player_join_queue(s: SocketRef, _account_token: Data<String>) {
     println!("Player with id {} wants to join the queue", _account.id);
     // If player is not queued
     let queued_players_ref = QUEUED_PLAYERS.read().await;
-    if (*queued_players_ref).iter().any(|x: &Queue| x.account.id == _account.id) {
+    if !(*queued_players_ref).iter().any(|x: &Queue| x.account.id == _account.id) {
         drop(queued_players_ref);
         println!("Player with id {} joined queue", _account.id);
         s.emit("joined-queue", "").ok();
@@ -181,9 +213,12 @@ async fn handle_player_join_queue(s: SocketRef, _account_token: Data<String>) {
             socket: Arc::new(s),
         });
 
-        drop(queue_ref);
         println!("Added Player with id {} to queue", _account.id);
+        println!("New queue length {}", queue_ref.len());
+        drop(queue_ref);
+
     } else {
+        println!("{:?}", *queued_players_ref);
         drop(queued_players_ref);
         println!(
             "Player with id {} could not join queue, as they already have",
@@ -192,4 +227,38 @@ async fn handle_player_join_queue(s: SocketRef, _account_token: Data<String>) {
         s.emit("join-failed", "You are already in queue").ok();
     }
     println!("fIN");
+}
+
+fn connect_to_room(queue: &Queue, _match: &MatchWithPlayers) {
+    let room = format!("room-{}", _match.id);
+    println!("User attempting to join room no {}", _match.id);
+    // Leave the current chat room
+    if let Ok(rooms) = queue.socket.rooms() {
+        for room in rooms {
+            // We may have rooms unrelated to the chats, so we make sure only to leave chat rooms
+            if room.contains("room-") {
+                queue.socket.leave(room).ok();
+            }
+        }
+    }
+    if let Ok(_) = queue.socket.join(room.to_owned()) {
+        queue.socket.within(room.to_owned())
+            .emit("user-joined", "A new user has joined the room")
+            .ok();
+    } else {
+        queue.socket.emit("connect-failed", "Connection failed").ok();
+    };
+}
+
+fn handle_player_message(s: SocketRef, message: Data<String>) {
+    if let Ok(rooms) = s.rooms() {
+        for room in rooms {
+            // We may have rooms unrelated to the chats, so we make sure only to leave chat rooms
+            if room.contains("room-") {
+                
+                s.within(room.to_owned()).emit("new-message", message.0);
+                break;
+            }
+        }
+    }
 }

@@ -4,7 +4,7 @@ use socketioxide::extract::SocketRef;
 
 use crate::Account;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Queue {
     pub gamemode: i16,
     pub account: Account,
