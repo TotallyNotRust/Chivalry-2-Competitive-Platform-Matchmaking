@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::{collections::HashMap, env};
+use match_result::MatchResult;
 use tokio::sync::RwLock;
 
 use std::thread;
@@ -40,6 +41,7 @@ mod lib;
 mod queue;
 mod r#match; // r# is used to use "match" as identifier instead of keyword
 mod message;
+mod match_result;
 
 type AccountId = i32;
 lazy_static! {
@@ -91,6 +93,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // For each "message" event received, send a "message-back" event with the "Hello World!" event
         s.on("start-queue", handle_player_join_queue);
         s.on("message-match", handle_player_message);
+        s.on("disconnect", handle_player_leave);
+        s.on("submit-match-result", handle_match_result);
+        s.on("handle-approve-result", handle_approve_result)
     });
 
     let app = axum::Router::new()
@@ -261,4 +266,14 @@ fn handle_player_message(s: SocketRef, message: Data<String>) {
             }
         }
     }
+}
+
+fn handle_player_leave(s: SocketRef) {
+    //serde_json::from_str::<Account>(&message.0);
+}
+fn handle_match_result(s: SocketRef, message: Data<String>) {
+    serde_json::from_str::<MatchResult>(&message.0);
+}
+fn handle_approve_result(s: SocketRef, message: Data<String>) {
+    serde_json::from_str::<MatchResult>(&message.0);
 }
